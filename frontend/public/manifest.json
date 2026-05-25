@@ -1,0 +1,21 @@
+{
+  "name": "DeepCar — Buscador Inteligente",
+  "short_name": "DeepCar",
+  "description": "Encontre o melhor carro usado ou seminovo com inteligência artificial",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050c15",
+  "theme_color": "#050c15",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/DeepCar_Icon.png?v=20260525",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "maskable any"
+    }
+  ],
+  "categories": ["automotive", "shopping"],
+  "screenshots": [],
+  "prefer_related_applications": false
+}
