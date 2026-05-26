@@ -1,15 +1,20 @@
 from app.scrapers.base_scraper import BaseScraper, BaseVehicleData
 from typing import List, Optional
 from urllib.parse import urlencode
+import asyncio
 import logging
 import re
 import json
+import httpx
+import shutil
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 
 class OLXScraper(BaseScraper):
     BASE_URL = "https://www.olx.com.br/autos-e-pecas/carros-vans-e-utilitarios"
+    RETRYABLE_STATUS_CODES = {403, 405, 408, 425, 429, 500, 502, 503, 504}
 
     def __init__(
         self,
@@ -32,58 +37,158 @@ class OLXScraper(BaseScraper):
         target_base_url = (base_url or self.BASE_URL).rstrip("/")
         return f"{target_base_url}?{urlencode(params)}"
 
-    async def scrape(self, max_pages: Optional[int] = None) -> List[dict]:
-        from playwright.async_api import async_playwright
+    def _build_headers(self) -> dict:
+        return {
+            "User-Agent": self._get_random_user_agent(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+        }
 
+    def _create_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=20,
+            headers=self._build_headers(),
+        )
+
+    def _get_curl_executable(self) -> Optional[str]:
+        return shutil.which("curl") or shutil.which("curl.exe")
+
+    async def _get_listing_page_via_curl(self, url: str, *, context: str) -> Optional[str]:
+        curl_executable = self._get_curl_executable()
+        if not curl_executable:
+            return None
+
+        command = [
+            curl_executable,
+            "-sS",
+            "-L",
+            "--compressed",
+            "-A",
+            self._get_random_user_agent(),
+            "-H",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "-H",
+            "Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "-H",
+            "Cache-Control: no-cache",
+            "-H",
+            "Pragma: no-cache",
+            url,
+        ]
+
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+            self.logger.warning("%s curl fallback failed: %s", context, detail or completed.returncode)
+            return None
+
+        return completed.stdout.decode("utf-8", errors="replace")
+
+    async def _get_listing_page(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        context: str,
+        max_attempts: int = 3,
+    ) -> Optional[str]:
+        last_status: Optional[int] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.get(url)
+            except httpx.RequestError as e:
+                if attempt == max_attempts:
+                    self.logger.error("%s request error: %s", context, e)
+                    return None
+
+                self.logger.warning(
+                    "%s request error on attempt %s/%s: %s",
+                    context,
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+                await self._random_delay(1200 * attempt, 1800 * attempt)
+                continue
+
+            if response.status_code == 200:
+                return response.content.decode("utf-8", errors="replace")
+
+            if response.status_code == 403:
+                self.logger.warning("%s returned status 403 via httpx; trying curl fallback", context)
+                curl_html = await self._get_listing_page_via_curl(url, context=context)
+                if curl_html:
+                    return curl_html
+
+            last_status = response.status_code
+            if response.status_code not in self.RETRYABLE_STATUS_CODES or attempt == max_attempts:
+                self.logger.warning("%s returned status %s", context, response.status_code)
+                return None
+
+            self.logger.warning(
+                "%s returned status %s on attempt %s/%s; retrying",
+                context,
+                response.status_code,
+                attempt,
+                max_attempts,
+            )
+            await self._random_delay(1200 * attempt, 1800 * attempt)
+
+        if last_status is not None:
+            self.logger.warning("%s exhausted retries with status %s", context, last_status)
+        return None
+
+    def _extract_next_data(self, html_text: str) -> Optional[dict]:
+        try:
+            match = re.search(
+                r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+                html_text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if not match:
+                return None
+            return json.loads(match.group(1))
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"OLX __NEXT_DATA__ decode error: {e}")
+            return None
+
+    async def scrape(self, max_pages: Optional[int] = None) -> List[dict]:
         pages_limit = max_pages or self.max_pages
         vehicles = []
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                )
-                context = await browser.new_context(
-                    user_agent=self._get_random_user_agent(),
-                    viewport={"width": 1366, "height": 768},
-                    locale="pt-BR",
-                )
-                page = await context.new_page()
-
+            async with self._create_client() as client:
                 for base_url in self.base_urls:
                     for page_num in range(self.start_page, self.start_page + pages_limit):
                         url = self._build_listing_url(page_num, base_url=base_url)
                         self.logger.info(f"OLX scraping page {page_num}: {url}")
 
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                            await self._random_delay(2000, 3500)
+                            html_text = await self._get_listing_page(client, url, context=f"OLX page {page_num}")
+                            if not html_text:
+                                continue
 
-                            # OLX embeds listing data as __NEXT_DATA__ JSON (Next.js)
-                            next_data = await page.evaluate("""
-                                () => {
-                                    try {
-                                        const el = document.getElementById('__NEXT_DATA__');
-                                        return el ? JSON.parse(el.textContent) : null;
-                                    } catch(e) { return null; }
-                                }
-                            """)
+                            next_data = self._extract_next_data(html_text)
+                            if not next_data:
+                                self.logger.warning(f"OLX page {page_num}: __NEXT_DATA__ not found")
+                                continue
 
-                            if next_data:
-                                page_vehicles = self._parse_next_data(next_data)
-                                vehicles.extend(page_vehicles)
-                                self.logger.info(f"OLX page {page_num}: extracted {len(page_vehicles)} via __NEXT_DATA__")
-                            else:
-                                # Fallback: DOM selectors
-                                page_vehicles = await self._scrape_dom(page)
-                                vehicles.extend(page_vehicles)
-                                self.logger.info(f"OLX page {page_num}: extracted {len(page_vehicles)} via DOM")
-
+                            page_vehicles = self._parse_next_data(next_data)
+                            vehicles.extend(page_vehicles)
+                            self.logger.info(f"OLX page {page_num}: extracted {len(page_vehicles)} via __NEXT_DATA__")
+                            await self._random_delay(800, 1500)
                         except Exception as e:
                             self.logger.error(f"OLX page {page_num} error: {e}")
-
-                await browser.close()
 
         except Exception as e:
             self.logger.error(f"OLX scraper fatal error: {e}")
@@ -93,51 +198,28 @@ class OLXScraper(BaseScraper):
 
     async def scrape_stream(self, max_pages: int = 2):
         """Async generator: yields List[dict] per page as they are scraped."""
-        from playwright.async_api import async_playwright
-
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                )
-                context = await browser.new_context(
-                    user_agent=self._get_random_user_agent(),
-                    viewport={"width": 1366, "height": 768},
-                    locale="pt-BR",
-                )
-                page = await context.new_page()
-
+            async with self._create_client() as client:
                 for base_url in self.base_urls:
                     for page_num in range(self.start_page, self.start_page + max_pages):
                         url = self._build_listing_url(page_num, base_url=base_url)
                         self.logger.info(f"OLX stream page {page_num}: {url}")
                         page_vehicles = []
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                            await self._random_delay(2000, 3500)
-
-                            next_data = await page.evaluate("""
-                                () => {
-                                    try {
-                                        const el = document.getElementById('__NEXT_DATA__');
-                                        return el ? JSON.parse(el.textContent) : null;
-                                    } catch(e) { return null; }
-                                }
-                            """)
-
-                            if next_data:
-                                page_vehicles = self._parse_next_data(next_data)
-                            else:
-                                page_vehicles = await self._scrape_dom(page)
+                            html_text = await self._get_listing_page(client, url, context=f"OLX stream page {page_num}")
+                            if html_text:
+                                next_data = self._extract_next_data(html_text)
+                                if next_data:
+                                    page_vehicles = self._parse_next_data(next_data)
+                                else:
+                                    self.logger.warning(f"OLX stream page {page_num}: __NEXT_DATA__ not found")
 
                             self.logger.info(f"OLX stream page {page_num}: {len(page_vehicles)} vehicles")
+                            await self._random_delay(800, 1500)
                         except Exception as e:
                             self.logger.error(f"OLX stream page {page_num} error: {e}")
 
                         yield page_vehicles
-
-                await browser.close()
 
         except Exception as e:
             self.logger.error(f"OLX stream fatal error: {e}")

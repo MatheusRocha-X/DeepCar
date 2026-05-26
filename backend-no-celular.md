@@ -31,7 +31,7 @@ O que funciona bem nesse modelo:
 
 O que fica fraco nesse modelo:
 
-- scraping com Playwright/Chromium dentro do Android
+- scraping continuo por horas em aparelho fraco
 - jobs pesados e continuos rodando 24h
 - bootstrap automatico agressivo do backend
 
@@ -41,7 +41,7 @@ Para o DeepCar atual, o melhor uso do celular e este:
 2. Vercel = frontend
 3. scraping pesado = fora do celular quando necessario
 
-Se voce tentar usar o celular para o pacote completo do DeepCar, incluindo scraping constante com Playwright, a chance de instabilidade sobe bastante.
+Se voce tentar usar o celular para o pacote completo do DeepCar, incluindo scraping constante e bootstrap agressivo, a chance de instabilidade sobe bastante.
 
 ## Requisitos minimos
 
@@ -84,7 +84,7 @@ Abra o Termux e rode:
 ```bash
 pkg update -y
 pkg upgrade -y
-pkg install -y git python nano tmux openssh sqlite clang rust make pkg-config libffi openssl libjpeg-turbo libxml2 libxslt termux-services cloudflared
+pkg install -y curl git python nano tmux openssh sqlite clang rust make pkg-config libffi openssl libjpeg-turbo libxml2 libxslt termux-services cloudflared
 ```
 
 Observacao:
@@ -114,8 +114,8 @@ pip install -r backend/requirements.phone.txt
 
 Observacao importante:
 
-- use `backend/requirements.phone.txt` no celular porque `playwright` nao possui wheel compativel com esse ambiente
-- esse modo e pensado para API + SQLite, sem scraping ativo no proprio celular
+- use `backend/requirements.phone.txt` no celular; a OLX agora roda sem Playwright nesse modo
+- mantenha o pacote `curl` instalado no Termux porque a OLX pode bloquear `httpx` com 403 e o scraper faz fallback automatico para o `curl` do sistema
 
 Se a instalacao falhar em alguma dependencia nativa, rode novamente depois de confirmar que os pacotes do Passo 1 foram instalados corretamente.
 
@@ -135,9 +135,9 @@ Use algo nesta linha:
 DATABASE_URL=sqlite+aiosqlite:///./deepcar.db
 SECRET_KEY=troque-por-uma-chave-forte
 DEBUG=false
-ENABLE_SCRAPER=false
-ENABLE_SCHEDULER=false
-ENABLE_STARTUP_BOOTSTRAP=false
+ENABLE_SCRAPER=true
+ENABLE_SCHEDULER=true
+ENABLE_STARTUP_BOOTSTRAP=true
 SCRAPER_INTERVAL_MINUTES=60
 MAX_PAGES_PER_SOURCE=5
 CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000","https://SEU-PROJETO.vercel.app"]
@@ -148,7 +148,7 @@ Notas importantes:
 - o SQLite vai ficar em `~/deepcar/backend/deepcar.db`
 - o cache atual do projeto e em memoria, entao Redis nao e obrigatorio
 - ajuste `CORS_ORIGINS` com a URL real do seu frontend no Vercel
-- com `ENABLE_SCRAPER=false`, as rotas de scraping ficam desativadas de proposito nesse modo celular
+- se o aparelho esquentar demais, primeiro reduza `SCRAPER_INTERVAL_MINUTES` ou volte apenas `ENABLE_STARTUP_BOOTSTRAP=false`
 
 ## Passo 5: testar a API localmente no celular
 
@@ -372,13 +372,13 @@ Se quiser mais seguranca, copie periodicamente a pasta `~/backups` para outro eq
 
 ## Passo 12: limites e riscos reais
 
-### 1. Playwright no Android
+### 1. Carga de scraping no Android
 
-O maior ponto de risco do DeepCar no celular e o scraping com Playwright. O projeto atual depende disso para parte do fluxo com OLX. Em um celular Android antigo, isso pode:
+O maior ponto de risco do DeepCar no celular continua sendo o scraping frequente. A OLX agora pode rodar sem Playwright, com leitura de `__NEXT_DATA__` e fallback para `curl`, mas em um Android antigo isso ainda pode:
 
-- falhar ao instalar ou abrir browser
 - esquentar demais o aparelho
 - ser morto pelo sistema
+- sofrer bloqueios temporarios do site
 - deixar o app instavel ao longo dos dias
 
 ### 2. Scheduler embutido no FastAPI
@@ -391,7 +391,7 @@ Hoje o backend sobe com APScheduler dentro de `app.main`. Isso significa que, qu
 - atualizacao FIPE
 - reprocessamento de score
 
-Para o uso em celular, isso pode ser pesado demais dependendo do aparelho.
+Para o uso em celular, isso pode ser pesado demais dependendo do aparelho, principalmente quando bootstrap e scheduler rodam juntos.
 
 ### 3. SQLite em celular
 
@@ -403,13 +403,13 @@ SQLite funciona bem para pouco volume e um unico processo, mas:
 
 ## Recomendacao tecnica para o DeepCar nesse cenario
 
-Se voce quer usar o celular como backend 24h por dia, a configuracao mais sensata e:
+Se voce quer usar o celular como backend 24h por dia, a configuracao mais segura continua sendo controlar a agressividade do scraping:
 
-1. celular roda apenas API + SQLite + servico web
+1. celular roda API + SQLite + scheduler
 2. frontend fica no Vercel
-3. scraping pesado roda manualmente em outro ambiente quando necessario
+3. bootstrap inicial e intervalo de scraping devem ser ajustados conforme temperatura e estabilidade do aparelho
 
-Se voce realmente precisar de scraping continuo, o melhor e mover isso para:
+Se o celular nao aguentar scraping continuo, o melhor plano B continua sendo mover apenas a coleta para:
 
 - seu PC
 - GitHub Actions
