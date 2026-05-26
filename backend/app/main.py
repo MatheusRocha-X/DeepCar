@@ -22,8 +22,16 @@ async def lifespan(app: FastAPI):
     await create_tables()
     logger.info("Database tables created/verified")
     startup_scrape_task = None
+
+    from app.scrapers.scheduler import scraper_scheduler
     from app.services.maintenance_service import rescore_existing_vehicles, update_missing_fipe_prices
+    from app.services.scrape_service import bootstrap_active_scrapers_if_needed
     from app.services.vehicle_service import delete_stale_vehicles, refresh_active_listings
+
+    async def _scheduled_scrape():
+        logger.info("Scheduled scraper starting...")
+        async with AsyncSessionLocal() as db:
+            await scraper_scheduler.run_source("all", db)
 
     async def _scheduled_cleanup():
         await delete_stale_vehicles(days=7)
@@ -45,75 +53,52 @@ async def lifespan(app: FastAPI):
         updated = await rescore_existing_vehicles(limit=None)
         logger.info("Daily rescore finished: %s vehicles reprocessed", updated)
 
-    scheduler = None
-    if settings.ENABLE_SCHEDULER:
-        scheduler = AsyncIOScheduler()
-        if settings.ENABLE_SCRAPER:
-            from app.scrapers.scheduler import scraper_scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(_scheduled_scrape, "interval", hours=6, id="scraper_run", misfire_grace_time=300)
+    scheduler.add_job(_scheduled_cleanup, "interval", hours=12, id="stale_cleanup", misfire_grace_time=300)
+    scheduler.add_job(_scheduled_refresh, "interval", hours=2, id="refresh_listings", misfire_grace_time=300)
+    scheduler.add_job(
+        _scheduled_fipe_update,
+        "cron",
+        hour=3,
+        minute=0,
+        id="daily_fipe_update",
+        misfire_grace_time=3600,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduled_rescore,
+        "cron",
+        hour=4,
+        minute=0,
+        id="daily_rescore",
+        misfire_grace_time=3600,
+        max_instances=1,
+    )
+    scheduler.start()
+    logger.info(
+        "Scheduler started: scraper every 6h, refresh every 2h, cleanup every 12h, FIPE daily at 03:00, rescore daily at 04:00"
+    )
 
-            async def _scheduled_scrape():
-                logger.info("Scheduled scraper starting...")
-                async with AsyncSessionLocal() as db:
-                    await scraper_scheduler.run_source("all", db)
+    async def _startup_bootstrap():
+        try:
+            result = await bootstrap_active_scrapers_if_needed()
+            if result["triggered"]:
+                logger.info(
+                    "Startup scrape completed with %s vehicles saved",
+                    result["total_saved"],
+                )
+        except Exception as exc:
+            logger.error("Startup scrape bootstrap failed: %s", exc)
 
-            scheduler.add_job(_scheduled_scrape, "interval", hours=6, id="scraper_run", misfire_grace_time=300)
-        else:
-            logger.info("Scheduled scraping disabled by config")
-
-        scheduler.add_job(_scheduled_cleanup, "interval", hours=12, id="stale_cleanup", misfire_grace_time=300)
-        scheduler.add_job(_scheduled_refresh, "interval", hours=2, id="refresh_listings", misfire_grace_time=300)
-        scheduler.add_job(
-            _scheduled_fipe_update,
-            "cron",
-            hour=3,
-            minute=0,
-            id="daily_fipe_update",
-            misfire_grace_time=3600,
-            max_instances=1,
-        )
-        scheduler.add_job(
-            _scheduled_rescore,
-            "cron",
-            hour=4,
-            minute=0,
-            id="daily_rescore",
-            misfire_grace_time=3600,
-            max_instances=1,
-        )
-        scheduler.start()
-        logger.info(
-            "Scheduler started: scraper every 6h, refresh every 2h, cleanup every 12h, FIPE daily at 03:00, rescore daily at 04:00"
-        )
-    else:
-        logger.info("Scheduler disabled by config")
-
-    if settings.ENABLE_SCRAPER and settings.ENABLE_STARTUP_BOOTSTRAP:
-        from app.services.scrape_service import bootstrap_active_scrapers_if_needed
-
-        async def _startup_bootstrap():
-            try:
-                result = await bootstrap_active_scrapers_if_needed()
-                if result["triggered"]:
-                    logger.info(
-                        "Startup scrape completed with %s vehicles saved",
-                        result["total_saved"],
-                    )
-            except Exception as exc:
-                logger.error("Startup scrape bootstrap failed: %s", exc)
-
-        startup_scrape_task = asyncio.create_task(_startup_bootstrap())
-    elif not settings.ENABLE_SCRAPER:
-        logger.info("Scraper features disabled by config")
-    else:
-        logger.info("Startup bootstrap disabled by config")
+    startup_scrape_task = asyncio.create_task(_startup_bootstrap())
 
     yield
 
     if startup_scrape_task and not startup_scrape_task.done():
         startup_scrape_task.cancel()
 
-    if scheduler:
-        scheduler.shutdown(wait=False)
+    scheduler.shutdown(wait=False)
     logger.info("Shutting down DeepCar API...")
 
 

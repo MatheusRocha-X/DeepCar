@@ -2,6 +2,11 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { SearchFilters, OrderBy } from "@/types";
 
+function sanitizeFilters(filters: SearchFilters): SearchFilters {
+  const { source: _source, ...rest } = filters;
+  return rest;
+}
+
 interface SearchState {
   filters: SearchFilters;
   hasHydrated: boolean;
@@ -9,6 +14,7 @@ interface SearchState {
   resetFilters: () => void;
   setPage: (page: number) => void;
   setOrderBy: (order: OrderBy) => void;
+  normalizeFilters: () => void;
   setHasHydrated: (hasHydrated: boolean) => void;
 }
 
@@ -21,17 +27,19 @@ const defaultFilters: SearchFilters = {
 export const useSearchStore = create<SearchState>()(
   persist(
     (set) => ({
-      filters: defaultFilters,
+      filters: sanitizeFilters(defaultFilters),
       hasHydrated: false,
       setFilters: (newFilters) =>
         set((state) => ({
-          filters: { ...state.filters, ...newFilters, page: 1 },
+          filters: sanitizeFilters({ ...state.filters, ...newFilters, page: 1 }),
         })),
-      resetFilters: () => set({ filters: defaultFilters }),
+      resetFilters: () => set({ filters: sanitizeFilters(defaultFilters) }),
       setPage: (page) =>
-        set((state) => ({ filters: { ...state.filters, page } })),
+        set((state) => ({ filters: sanitizeFilters({ ...state.filters, page }) })),
       setOrderBy: (order_by) =>
-        set((state) => ({ filters: { ...state.filters, order_by, page: 1 } })),
+        set((state) => ({ filters: sanitizeFilters({ ...state.filters, order_by, page: 1 }) })),
+      normalizeFilters: () =>
+        set((state) => ({ filters: sanitizeFilters(state.filters) })),
       setHasHydrated: (hasHydrated) => set({ hasHydrated }),
     }),
     {
@@ -39,6 +47,7 @@ export const useSearchStore = create<SearchState>()(
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({ filters: state.filters }),
       onRehydrateStorage: () => (state) => {
+        state?.normalizeFilters();
         state?.setHasHydrated(true);
       },
     }

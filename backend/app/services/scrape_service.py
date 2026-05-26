@@ -33,7 +33,8 @@ INITIAL_BOOTSTRAP_TARGETS = {
 }
 OLX_PAGE_SIZE_ESTIMATE = 50
 OLX_BOOTSTRAP_CHUNK_PAGES = 5
-OLX_BOOTSTRAP_MAX_PAGES = 15
+OLX_BOOTSTRAP_MIN_MAX_PAGES = 15
+OLX_BOOTSTRAP_SAFETY_MULTIPLIER = 3
 
 _bootstrap_status = {
     "status": "idle",
@@ -239,23 +240,30 @@ async def count_active_source_vehicles() -> int:
     return sum(counts.values())
 
 
+def _get_olx_bootstrap_max_pages(target: int) -> int:
+    estimated_pages = math.ceil(max(target, 1) / max(OLX_PAGE_SIZE_ESTIMATE, 1))
+    return max(OLX_BOOTSTRAP_MIN_MAX_PAGES, estimated_pages * OLX_BOOTSTRAP_SAFETY_MULTIPLIER)
+
+
 async def _bootstrap_olx_target(target: int, current_count: int) -> int:
     if current_count >= target:
         return current_count
 
     start_page = max(1, math.floor(current_count / OLX_PAGE_SIZE_ESTIMATE) + 1)
-    while current_count < target and start_page <= OLX_BOOTSTRAP_MAX_PAGES:
+    max_pages = _get_olx_bootstrap_max_pages(target)
+    while current_count < target and start_page <= max_pages:
         remaining = target - current_count
         pages = min(
             OLX_BOOTSTRAP_CHUNK_PAGES,
             max(1, math.ceil(remaining / OLX_PAGE_SIZE_ESTIMATE)),
         )
         result = await run_single_source_scraper("olx", pages=pages, start_page=start_page)
-        saved = int(result.get("saved", 0) or 0)
-        if saved <= 0:
+        chunk_saved = int(result.get("saved", 0) or 0)
+        if chunk_saved <= 0:
             break
 
-        current_count += saved
+        refreshed_counts = await get_active_source_counts()
+        current_count = int(refreshed_counts.get("olx", current_count) or 0)
         await _invalidate_catalog_cache()
         _update_bootstrap_status(
             current_source="olx",
@@ -263,6 +271,14 @@ async def _bootstrap_olx_target(target: int, current_count: int) -> int:
             message=f"Carregando anúncios iniciais da OLX ({min(current_count, target)}/{target}).",
         )
         start_page += pages
+
+    if current_count < target:
+        logger.info(
+            "Initial OLX bootstrap stopped at %s/%s after scanning until page %s",
+            current_count,
+            target,
+            max_pages,
+        )
 
     return current_count
 

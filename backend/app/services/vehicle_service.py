@@ -597,6 +597,13 @@ def _extract_olx_search_base_url(source_url: Any) -> Optional[str]:
 async def resolve_olx_base_urls(db: AsyncSession, filters: SearchFilters, brand_path: Optional[str] = None) -> list[str]:
     state = _clean_filter_text(filters.estado).upper()
     city_key = _normalize_filter_key(filters.cidade)
+
+    if not state and not city_key:
+        default_url = f"https://www.olx.com.br/{OLX_BASE_CATEGORY_PATH}"
+        if brand_path:
+            return [f"{default_url}/{brand_path}"]
+        return [default_url]
+
     cache_key = (state or "", city_key or "")
     now = time.time()
 

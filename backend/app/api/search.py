@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from app.core.config import settings
 from app.core.database import get_db
 from app.models.schemas import SearchFilters, SearchResponse, OrderBy
 from app.services.vehicle_service import search_vehicles, has_meaningful_search_filters
@@ -55,7 +54,7 @@ async def search(
 
     # Trigger a background scrape on page 1 whenever the user applies filters.
     # The scheduler debounces repeated triggers (30-min cooldown per query).
-    if settings.ENABLE_SCRAPER and page == 1 and has_meaningful_search_filters(filters):
+    if page == 1 and has_meaningful_search_filters(filters):
         from app.scrapers.scheduler import scraper_scheduler
         scraper_scheduler.start_smart_scrape_for_filters(filters)
 

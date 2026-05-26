@@ -180,13 +180,13 @@ type DraftFilters = Pick<SearchFilters,
   | "km_min" | "km_max"
   | "preco_min" | "preco_max"
   | "combustivel" | "cambio" | "vendedor_tipo"
-  | "estado" | "cidade" | "source"
+  | "estado" | "cidade"
 >;
 
 const DRAFT_KEYS: (keyof DraftFilters)[] = [
   "marca", "modelo", "ano_min", "ano_max", "km_min", "km_max",
   "preco_min", "preco_max", "combustivel", "cambio", "vendedor_tipo",
-  "estado", "cidade", "source",
+  "estado", "cidade",
 ];
 
 function toDraft(f: SearchFilters): DraftFilters {
@@ -198,7 +198,6 @@ function toDraft(f: SearchFilters): DraftFilters {
     combustivel: f.combustivel, cambio: f.cambio,
     vendedor_tipo: f.vendedor_tipo,
     estado: f.estado, cidade: f.cidade,
-    source: f.source,
   };
 }
 
@@ -293,7 +292,7 @@ export function FilterPanel() {
               )}
             </div>
             <p className="mt-1 max-w-xs text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Ajuste faixa de preço, ano, local e origem sem perder o contexto da busca.
+              Ajuste faixa de preço, ano e local sem perder o contexto da busca.
             </p>
           </div>
         </div>
@@ -407,15 +406,6 @@ export function FilterPanel() {
               options={cidades}
             />
           )}
-
-          <SectionHeader>Plataforma</SectionHeader>
-
-          <SelectField
-            label="Fonte"
-            value={draft.source}
-            onChange={(v) => setDraft((d) => ({ ...d, source: v }))}
-            options={options?.fontes || []}
-          />
 
           <div className="flex gap-2 border-t border-white/[0.06] pt-2">
             <button

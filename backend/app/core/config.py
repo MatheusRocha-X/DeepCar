@@ -7,10 +7,6 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    ENABLE_SCRAPER: bool = True
-    ENABLE_SCHEDULER: bool = True
-    ENABLE_STARTUP_BOOTSTRAP: bool = True
-
     DATABASE_URL: str = "sqlite+aiosqlite:///./deepcar.db"
 
     REDIS_URL: str = "redis://localhost:6379"

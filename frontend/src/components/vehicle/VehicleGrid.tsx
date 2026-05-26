@@ -164,7 +164,7 @@ export function VehicleGrid() {
   const pagesScraped = scrapeProgress?.pages_scraped ?? 0;
   const minPagesBeforeDisplay = scrapeProgress?.min_pages_before_display ?? 3;
   const isOlxWorkerOnlySearch = Boolean(
-    scrapeProgress?.worker_running && !scrapeProgress?.task_running && pagesScraped === 0
+    scrapeProgress?.worker_running && pagesScraped === 0
   );
 
   const { data, isLoading, isFetching, isError } = useQuery({
