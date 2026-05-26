@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import settings
 from app.core.database import get_db
 from app.scrapers.scheduler import scraper_scheduler
 from app.services.scrape_service import get_initial_bootstrap_status
@@ -9,12 +10,18 @@ import json
 router = APIRouter(prefix="/scraper", tags=["scraper"])
 
 
+def _require_scraper_enabled() -> None:
+    if not settings.ENABLE_SCRAPER:
+        raise HTTPException(status_code=503, detail="Scraping desativado neste ambiente")
+
+
 @router.post("/run/{source}")
 async def run_scraper(
     source: str,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
+    _require_scraper_enabled()
     valid_sources = ["olx", "all"]
     if source not in valid_sources:
         raise HTTPException(status_code=400, detail=f"Fonte inválida. Use: {valid_sources}")
@@ -29,6 +36,7 @@ async def live_scrape(
     q: str = Query(..., min_length=2, description="Busca a ser rastreada em tempo real"),
     db: AsyncSession = Depends(get_db),
 ):
+    _require_scraper_enabled()
     """
     Dispara um scrape rápido (2 páginas OLX) para a query do usuário.
     Roda em background — o frontend deve re-buscar após ~15s.
@@ -41,6 +49,7 @@ async def live_scrape(
 async def live_scrape_stream(
     q: str = Query(..., min_length=2, description="Busca a ser rastreada em tempo real"),
 ):
+    _require_scraper_enabled()
     """
     SSE endpoint: transmite progresso do scraping em tempo real.
     Eventos: {"source": str, "saved": int} por lote, depois {"done": true, "total": int}.
@@ -77,6 +86,7 @@ async def bootstrap_status():
 async def cancel_scrape(
     q: str = Query(..., min_length=1, description="Busca ativa que deve ser cancelada"),
 ):
+    _require_scraper_enabled()
     return scraper_scheduler.cancel_query_scrape(q)
 
 
