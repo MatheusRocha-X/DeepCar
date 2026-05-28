@@ -2,6 +2,13 @@
 
 Buscador de veículos usados e seminovos com agregação de anúncios, score automático, insights de risco e atualização contínua da base.
 
+## Licenca
+
+Este projeto esta publicado com direitos reservados.
+Nao e permitida a copia, reutilizacao, modificacao, distribuicao ou criacao de obras derivadas sem autorizacao previa por escrito do titular.
+
+Consulte o arquivo `LICENSE` para os termos completos.
+
 ## Estado atual
 
 - Fontes ativas no fluxo principal: OLX e iCarros.
