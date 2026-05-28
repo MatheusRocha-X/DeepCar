@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.scrapers.scheduler import scraper_scheduler
-from app.services.scrape_service import get_initial_bootstrap_status
+from app.services.scrape_service import ACTIVE_SCRAPERS, get_initial_bootstrap_status
 import json
 
 router = APIRouter(prefix="/scraper", tags=["scraper"])
@@ -15,7 +15,8 @@ async def run_scraper(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    valid_sources = ["olx", "all"]
+    source = source.lower()
+    valid_sources = [*ACTIVE_SCRAPERS.keys(), "all"]
     if source not in valid_sources:
         raise HTTPException(status_code=400, detail=f"Fonte inválida. Use: {valid_sources}")
 
@@ -30,7 +31,7 @@ async def live_scrape(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Dispara um scrape rápido (2 páginas OLX) para a query do usuário.
+    Dispara um scrape rápido (2 páginas por fonte ativa) para a query do usuário.
     Roda em background — o frontend deve re-buscar após ~15s.
     """
     background_tasks.add_task(scraper_scheduler.live_scrape, q, db)
@@ -43,7 +44,7 @@ async def live_scrape_stream(
 ):
     """
     SSE endpoint: transmite progresso do scraping em tempo real.
-    Eventos: {"source": str, "saved": int} por lote, depois {"done": true, "total": int}.
+    Eventos: {"source": str, "saved": int} por fonte, depois {"done": true, "total": int}.
     """
     async def event_generator():
         try:

@@ -16,13 +16,39 @@ interface VehicleCardProps {
   index?: number;
 }
 
+function getSourceBadgeClass(sourceName?: string): string {
+  const sourceKey = (sourceName || "").trim().toLowerCase();
+
+  if (sourceKey === "olx") {
+    return "border-cyan-400/25 bg-cyan-500/10 text-cyan-300";
+  }
+
+  if (sourceKey === "icarros") {
+    return "border-emerald-400/25 bg-emerald-500/10 text-emerald-300";
+  }
+
+  return "border-white/[0.06] bg-white/[0.03] text-slate-300";
+}
+
 export function VehicleCard({ vehicle, index = 0 }: VehicleCardProps) {
   const { isFavorite, addFavorite: addLocal, removeFavorite: removeLocal } = useFavoriteStore();
   const favorited = isFavorite(vehicle.id);
   const [loading, setLoading] = useState(false);
   const [imgError, setImgError] = useState(false);
+  const hasPrimaryImage = Boolean(vehicle.fotos?.[0]) && !imgError;
+  const listingSignals = [
+    vehicle.possui_passagem_leilao
+      ? { label: "Leilão", className: "border-rose-400/25 bg-rose-500/10 text-rose-200" }
+      : null,
+    vehicle.valor_referente_entrada
+      ? { label: "Entrada", className: "border-amber-300/25 bg-amber-500/10 text-amber-100" }
+      : null,
+    vehicle.preco_suspeito
+      ? { label: "Preço suspeito", className: "border-orange-300/25 bg-orange-500/10 text-orange-100" }
+      : null,
+  ].filter((signal): signal is { label: string; className: string } => Boolean(signal));
 
-  const mainImage = !imgError && vehicle.fotos?.[0]
+  const mainImage = hasPrimaryImage
     ? proxyImg(vehicle.fotos[0])
     : getVehicleImageFallback();
 
@@ -71,6 +97,11 @@ export function VehicleCard({ vehicle, index = 0 }: VehicleCardProps) {
               <div className="rounded-[1.2rem] border border-white/[0.06] bg-[#111111]/68 p-2.5 backdrop-blur-xl">
                 <ScoreRing score={vehicle.score} size="sm" />
               </div>
+              {!hasPrimaryImage && (
+                <span className="inline-flex items-center rounded-full border border-amber-300/20 bg-amber-500/12 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-100 backdrop-blur-xl">
+                  Sem foto
+                </span>
+              )}
             </div>
 
             <button
@@ -146,6 +177,22 @@ export function VehicleCard({ vehicle, index = 0 }: VehicleCardProps) {
             )}
           </div>
 
+          {listingSignals.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {listingSignals.map((signal) => (
+                <span
+                  key={signal.label}
+                  className={cn(
+                    "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]",
+                    signal.className
+                  )}
+                >
+                  {signal.label}
+                </span>
+              ))}
+            </div>
+          )}
+
           {vehicle.insights && vehicle.insights.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {vehicle.insights.slice(0, 2).map((insight, i) => (
@@ -160,9 +207,21 @@ export function VehicleCard({ vehicle, index = 0 }: VehicleCardProps) {
           )}
 
           <div className="flex items-center justify-between border-t border-white/[0.06] pt-3.5">
-            <span className="truncate text-sm text-slate-500 dark:text-slate-400">
-              {vehicle.vendedor_tipo || "Particular"}
-            </span>
+            <div className="flex min-w-0 items-center gap-2">
+              {vehicle.source_name && (
+                <span
+                  className={cn(
+                    "inline-flex flex-shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]",
+                    getSourceBadgeClass(vehicle.source_name)
+                  )}
+                >
+                  {vehicle.source_name}
+                </span>
+              )}
+              <span className="truncate text-sm text-slate-500 dark:text-slate-400">
+                {vehicle.vendedor_tipo || "Particular"}
+              </span>
+            </div>
             <span className="flex items-center gap-2 text-sm font-semibold text-brand-300">
               Abrir ficha
               <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-1" />

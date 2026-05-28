@@ -3,6 +3,8 @@ import asyncio
 import re
 from datetime import date
 
+from app.core.listing_flags import detect_listing_flags, is_suspicious_price
+
 
 SUSPICIOUS_TERMS = [
     "urgente", "preciso vender", "viagem", "doença", "financeiro",
@@ -17,27 +19,6 @@ POSITIVE_TERMS = [
 ]
 
 KM_MEDIA_ANUAL = 15000
-
-
-def _is_suspicious_price(
-    preco: float,
-    ano: Optional[int],
-    preco_referencia: Optional[float] = None,
-) -> bool:
-    if preco <= 0:
-        return False
-
-    if preco_referencia and preco_referencia > 0 and preco / preco_referencia < 0.20:
-        return True
-
-    if ano:
-        idade = max(0, date.today().year - ano)
-        if idade <= 5 and preco < 10000:
-            return True
-        if idade <= 10 and preco < 5000:
-            return True
-
-    return preco < 3000
 
 
 def _is_suspicious_km(km: int, ano: Optional[int]) -> bool:
@@ -118,8 +99,12 @@ def _score_preco(
         return -5.0, ["Preco nao informado"]
 
     preco_referencia = fipe_preco if fipe_preco and fipe_preco > 0 else preco_medio
-    if _is_suspicious_price(preco, ano, preco_referencia):
-        return -22.0, ["Revisar o preco"]
+    flags = detect_listing_flags(vehicle_data, preco_referencia=preco_referencia)
+    if flags["valor_referente_entrada"]:
+        return -30.0, ["Valor referente a entrada", "Preco muito abaixo do padrao"]
+
+    if is_suspicious_price(preco, ano, preco_referencia):
+        return -22.0, ["Preco muito abaixo do padrao"]
 
     # FIPE comparison takes priority when available
     if fipe_preco and fipe_preco > 0:
@@ -253,6 +238,11 @@ def _score_descricao(vehicle_data: dict) -> tuple[float, List[str]]:
 
     descricao = vehicle_data.get("descricao", "") or ""
     descricao_lower = descricao.lower()
+    flags = detect_listing_flags(vehicle_data)
+
+    if flags["possui_passagem_leilao"]:
+        score -= 18.0
+        insights.append("Possui passagem por leilao")
 
     if len(descricao) < 20:
         score -= 10.0
@@ -330,7 +320,8 @@ def calcular_score_batch(vehicles: list, calcular_media_por_modelo: bool = True)
         key = f"{v.get('marca', '')}_{v.get('modelo', '')}_{v.get('ano', 0)}"
         preco_medio = medias.get(key)
         score, insights = calcular_score(v, preco_medio, amostra_preco_size=tamanhos_amostra.get(key))
-        result.append({**v, "score": score, "insights": insights})
+        flags = detect_listing_flags(v, preco_referencia=preco_medio)
+        result.append({**v, **flags, "score": score, "insights": insights})
 
     return result
 
@@ -387,7 +378,8 @@ async def calcular_score_batch_com_fipe(vehicles: list) -> list:
             fipe_preco,
             tamanhos_amostra.get(key),
         )
-        entry = {**v, "score": score, "insights": insights}
+        flags = detect_listing_flags(v, preco_referencia=fipe_preco if fipe_preco else preco_medio)
+        entry = {**v, **flags, "score": score, "insights": insights}
         if fipe_preco:
             entry["fipe_preco"] = fipe_preco
         result.append(entry)

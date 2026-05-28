@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from app.core.cache import cache_delete_pattern
 from app.core.database import AsyncSessionLocal
 from app.models.vehicle import Vehicle
+from app.scrapers.icarros_scraper import ICarrosScraper
 from app.scrapers.olx_scraper import OLXScraper
 from app.services.score_service import calcular_score_batch
 from app.services.vehicle_service import create_or_update_vehicle
@@ -21,20 +22,32 @@ from app.services.vehicle_service import create_or_update_vehicle
 logger = logging.getLogger(__name__)
 
 DEFAULT_MANUAL_SCRAPE_PAGES = 3
-ACTIVE_SOURCE_NAMES = ("OLX",)
+ACTIVE_SOURCE_NAMES = ("OLX", "iCarros")
 SOURCE_DB_NAMES = {
     "olx": "OLX",
+    "icarros": "iCarros",
 }
 ACTIVE_SCRAPERS = {
     "olx": OLXScraper,
+    "icarros": ICarrosScraper,
 }
 INITIAL_BOOTSTRAP_TARGETS = {
     "olx": 500,
+    "icarros": 200,
 }
-OLX_PAGE_SIZE_ESTIMATE = 50
-OLX_BOOTSTRAP_CHUNK_PAGES = 5
-OLX_BOOTSTRAP_MIN_MAX_PAGES = 15
-OLX_BOOTSTRAP_SAFETY_MULTIPLIER = 3
+SOURCE_PAGE_SIZE_ESTIMATES = {
+    "olx": 50,
+    "icarros": 20,
+}
+SOURCE_BOOTSTRAP_CHUNK_PAGES = {
+    "olx": 5,
+    "icarros": 3,
+}
+SOURCE_BOOTSTRAP_MIN_MAX_PAGES = {
+    "olx": 15,
+    "icarros": 12,
+}
+BOOTSTRAP_SAFETY_MULTIPLIER = 3
 
 _bootstrap_status = {
     "status": "idle",
@@ -97,6 +110,10 @@ def _snapshot_bootstrap_status() -> dict:
 
 def get_initial_bootstrap_status() -> dict:
     return _snapshot_bootstrap_status()
+
+
+def _source_label(source: str) -> str:
+    return SOURCE_DB_NAMES.get(source, source)
 
 
 async def _run_olx_worker(
@@ -240,41 +257,48 @@ async def count_active_source_vehicles() -> int:
     return sum(counts.values())
 
 
-def _get_olx_bootstrap_max_pages(target: int) -> int:
-    estimated_pages = math.ceil(max(target, 1) / max(OLX_PAGE_SIZE_ESTIMATE, 1))
-    return max(OLX_BOOTSTRAP_MIN_MAX_PAGES, estimated_pages * OLX_BOOTSTRAP_SAFETY_MULTIPLIER)
+def _get_bootstrap_max_pages(source: str, target: int) -> int:
+    page_size = SOURCE_PAGE_SIZE_ESTIMATES.get(source, 20)
+    minimum_pages = SOURCE_BOOTSTRAP_MIN_MAX_PAGES.get(source, 10)
+    estimated_pages = math.ceil(max(target, 1) / max(page_size, 1))
+    return max(minimum_pages, estimated_pages * BOOTSTRAP_SAFETY_MULTIPLIER)
 
 
-async def _bootstrap_olx_target(target: int, current_count: int) -> int:
+async def _bootstrap_source_target(source: str, target: int, current_count: int) -> int:
     if current_count >= target:
         return current_count
 
-    start_page = max(1, math.floor(current_count / OLX_PAGE_SIZE_ESTIMATE) + 1)
-    max_pages = _get_olx_bootstrap_max_pages(target)
+    page_size_estimate = SOURCE_PAGE_SIZE_ESTIMATES.get(source, 20)
+    batch_pages = SOURCE_BOOTSTRAP_CHUNK_PAGES.get(source, 3)
+    source_label = _source_label(source)
+
+    start_page = max(1, math.floor(current_count / page_size_estimate) + 1)
+    max_pages = _get_bootstrap_max_pages(source, target)
     while current_count < target and start_page <= max_pages:
         remaining = target - current_count
         pages = min(
-            OLX_BOOTSTRAP_CHUNK_PAGES,
-            max(1, math.ceil(remaining / OLX_PAGE_SIZE_ESTIMATE)),
+            batch_pages,
+            max(1, math.ceil(remaining / page_size_estimate)),
         )
-        result = await run_single_source_scraper("olx", pages=pages, start_page=start_page)
+        result = await run_single_source_scraper(source, pages=pages, start_page=start_page)
         chunk_saved = int(result.get("saved", 0) or 0)
         if chunk_saved <= 0:
             break
 
         refreshed_counts = await get_active_source_counts()
-        current_count = int(refreshed_counts.get("olx", current_count) or 0)
+        current_count = int(refreshed_counts.get(source, current_count) or 0)
         await _invalidate_catalog_cache()
         _update_bootstrap_status(
-            current_source="olx",
-            saved_by_source={"olx": current_count},
-            message=f"Carregando anúncios iniciais da OLX ({min(current_count, target)}/{target}).",
+            current_source=source,
+            saved_by_source={source: current_count},
+            message=f"Carregando anuncios iniciais da {source_label} ({min(current_count, target)}/{target}).",
         )
         start_page += pages
 
     if current_count < target:
         logger.info(
-            "Initial OLX bootstrap stopped at %s/%s after scanning until page %s",
+            "Initial %s bootstrap stopped at %s/%s after scanning until page %s",
+            source_label,
             current_count,
             target,
             max_pages,
@@ -333,14 +357,21 @@ async def bootstrap_active_scrapers_if_needed(
         running=True,
         triggered=True,
         needs_initial_load=True,
-        message="DeepCar está iniciando e carregando os anúncios iniciais da OLX.",
+        message="DeepCar esta iniciando e carregando os anuncios iniciais das fontes ativas.",
         started_at=_now_iso(),
         finished_at=None,
         error=None,
     )
 
     try:
-        olx_count = await _bootstrap_olx_target(target_counts["olx"], existing_counts.get("olx", 0))
+        bootstrapped_counts = dict(existing_counts)
+        for source, target in target_counts.items():
+            bootstrapped_counts[source] = await _bootstrap_source_target(
+                source,
+                target,
+                bootstrapped_counts.get(source, 0),
+            )
+
         final_counts = await get_active_source_counts()
         total_saved = sum(
             max(final_counts.get(source, 0) - existing_counts.get(source, 0), 0)
@@ -355,7 +386,8 @@ async def bootstrap_active_scrapers_if_needed(
             needs_initial_load=False,
             current_source=None,
             saved_by_source={
-                "olx": max(final_counts.get("olx", 0), olx_count),
+                source: max(final_counts.get(source, 0), bootstrapped_counts.get(source, 0))
+                for source in target_counts
             },
             message="Base inicial carregada. Agora voce ja pode explorar os anuncios.",
             finished_at=_now_iso(),

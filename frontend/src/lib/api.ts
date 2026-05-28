@@ -6,7 +6,6 @@ import type {
   FilterOptions,
   FavoriteItem,
   InitialBootstrapStatus,
-  ScraperStatus,
   ScrapeProgress,
 } from "@/types";
 
@@ -139,18 +138,9 @@ export async function removeFavorite(vehicleId: number): Promise<void> {
   await api.delete(`/favorites/${vehicleId}`);
 }
 
-export async function getScraperStatus(): Promise<ScraperStatus[]> {
-  const { data } = await api.get("/scraper/status");
-  return data;
-}
-
 export async function getInitialBootstrapStatus(): Promise<InitialBootstrapStatus> {
   const { data } = await api.get("/scraper/bootstrap-status");
   return data;
-}
-
-export async function runScraper(source: string): Promise<void> {
-  await api.post(`/scraper/run/${source}`);
 }
 
 export async function cancelQueryScrape(q: string): Promise<{

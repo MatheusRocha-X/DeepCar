@@ -36,6 +36,7 @@ function buildSmartQuery(filters: SearchFilters): string {
   const cidade = filters.cidade?.trim() || "";
   const estado = filters.estado?.trim() || "";
   const source = filters.source?.trim() || "";
+  const passagemLeilao = filters.passagem_leilao;
   const parts: string[] = [];
 
   if (q) {
@@ -101,6 +102,11 @@ function buildSmartQuery(filters: SearchFilters): string {
   if (source) {
     parts.push(`fonte ${source}`);
   }
+  if (passagemLeilao === true) {
+    parts.push("com passagem por leilao");
+  } else if (passagemLeilao === false) {
+    parts.push("sem passagem por leilao");
+  }
 
   return parts.join(" ");
 }
@@ -115,16 +121,31 @@ function hasAppliedSearchFilters(filters: SearchFilters): boolean {
   });
 }
 
+function hasLiveSearchSignal(filters: SearchFilters): boolean {
+  const q = filters.q?.trim() || "";
+  if (q && q.toLowerCase() !== "carro") {
+    return true;
+  }
+
+  return Boolean(
+    filters.marca?.trim()
+    || filters.modelo?.trim()
+    || filters.ano_min !== undefined
+    || filters.ano_max !== undefined
+    || filters.passagem_leilao !== undefined
+  );
+}
+
 export function VehicleGrid() {
   const { filters, setPage, hasHydrated } = useSearchStore();
   const queryClient = useQueryClient();
   const [liveStatus, setLiveStatus] = useState<"idle" | "searching" | "done">("idle");
   const [backgroundRefreshUntil, setBackgroundRefreshUntil] = useState<number | null>(null);
-  const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLiveQuery = useRef<string>("");
   const activeSearchQuery = useRef<string>("");
   const streamCleanupRef = useRef<(() => void) | null>(null);
   const smartQuery = buildSmartQuery(filters);
+  const shouldUseLiveStream = smartQuery.length >= 3 && hasLiveSearchSignal(filters);
   const isDefaultCatalogView = !hasAppliedSearchFilters(filters);
   const shouldPollSmartSearchProgress = smartQuery.length >= 3
     && Boolean(backgroundRefreshUntil && Date.now() < backgroundRefreshUntil);
@@ -141,6 +162,7 @@ export function VehicleGrid() {
       return status?.running ? 1500 : false;
     },
     refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
     staleTime: 0,
   });
 
@@ -157,13 +179,17 @@ export function VehicleGrid() {
       return progress?.running || shouldPollSmartSearchProgress ? 1500 : false;
     },
     refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
     staleTime: 0,
   });
 
   const isScrapeRunning = Boolean(scrapeProgress?.running);
   const pagesScraped = scrapeProgress?.pages_scraped ?? 0;
   const minPagesBeforeDisplay = scrapeProgress?.min_pages_before_display ?? 3;
-  const isOlxWorkerOnlySearch = Boolean(
+  const hasActiveScrapeTask = Boolean(
+    scrapeProgress?.running || scrapeProgress?.task_running || scrapeProgress?.worker_running
+  );
+  const isWorkerOnlySearch = Boolean(
     scrapeProgress?.worker_running && pagesScraped === 0
   );
 
@@ -178,6 +204,7 @@ export function VehicleGrid() {
         ? 3000
         : false,
     refetchIntervalInBackground: true,
+      refetchOnWindowFocus: false,
   });
 
   const hasResults = (data?.results.length ?? 0) > 0;
@@ -189,13 +216,13 @@ export function VehicleGrid() {
   const totalResultPages = data?.total_pages ?? 0;
   const isSmartSearchActive = smartQuery.length >= 3
     && !scrapeProgress?.done
-    && (shouldDeferReveal || isScrapeRunning || liveStatus === "searching" || isFetching);
+    && (shouldDeferReveal || hasActiveScrapeTask || liveStatus === "searching");
   const shouldHoldEmptyState = isSmartSearchActive && !hasVisibleResults && pagesScraped < minPagesBeforeDisplay;
   const showSearchingBanner = isSmartSearchActive;
   const showPendingSearchEmptyState = smartQuery.length >= 3 && !hasVisibleResults && !scrapeProgress?.done;
   const showInitialBootstrapBanner = isDefaultCatalogView && Boolean(bootstrapStatus?.running);
   const showInitialBootstrapEmptyState = showInitialBootstrapBanner && !hasResults;
-  const bootstrapTargets = bootstrapStatus?.targets ?? { olx: 500 };
+  const bootstrapTargets = bootstrapStatus?.targets ?? { olx: 500, icarros: 200 };
   const bootstrapTotalTarget = bootstrapStatus?.total_target ?? Object.values(bootstrapTargets).reduce((sum, target) => sum + target, 0);
   const bootstrapTotalSaved = Math.min(bootstrapStatus?.total_saved ?? 0, bootstrapTotalTarget);
   const showHydrationLoadingState = !hasHydrated;
@@ -221,6 +248,9 @@ export function VehicleGrid() {
     if (smartQuery.length < 3) {
       setBackgroundRefreshUntil(null);
       lastLiveQuery.current = "";
+      streamCleanupRef.current?.();
+      streamCleanupRef.current = null;
+      setLiveStatus("idle");
       return;
     }
 
@@ -298,44 +328,46 @@ export function VehicleGrid() {
 
   // Trigger real-time live scrape via SSE when user has a text query
   useEffect(() => {
-    if (smartQuery.length < 3) return;
+    if (!shouldUseLiveStream) {
+      streamCleanupRef.current?.();
+      streamCleanupRef.current = null;
+      setLiveStatus("idle");
+      lastLiveQuery.current = "";
+      return;
+    }
+
     if (smartQuery === lastLiveQuery.current) return;
 
-    // Debounce: wait 800ms after the query stabilises before opening the stream
-    if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
-    liveTimerRef.current = setTimeout(() => {
-      lastLiveQuery.current = smartQuery;
-      // Close any existing stream before opening a new one
-      streamCleanupRef.current?.();
-      setLiveStatus("searching");
+    lastLiveQuery.current = smartQuery;
+    // Open the live stream immediately after an explicit search/filter apply.
+    streamCleanupRef.current?.();
+    setLiveStatus("searching");
 
-      const cleanup = openLiveScrapeStream(
-        smartQuery,
-        (_data) => {
-          // New vehicles arrived — refresh results immediately
-          queryClient.invalidateQueries({ queryKey: ["vehicles"] });
-        },
-        (total) => {
-          // Always refresh after stream ends to show latest DB results
-          queryClient.invalidateQueries({ queryKey: ["vehicles"] });
-          if (total > 0) {
-            setLiveStatus("done");
-            setTimeout(() => setLiveStatus("idle"), 3000);
-          } else {
-            setLiveStatus("idle");
-          }
-          streamCleanupRef.current = null;
+    const cleanup = openLiveScrapeStream(
+      smartQuery,
+      (_data) => {
+        // New vehicles arrived — refresh results immediately.
+        queryClient.invalidateQueries({ queryKey: ["vehicles"] });
+      },
+      (total) => {
+        // Always refresh after stream ends to show latest DB results.
+        queryClient.invalidateQueries({ queryKey: ["vehicles"] });
+        if (total > 0) {
+          setLiveStatus("done");
+          setTimeout(() => setLiveStatus("idle"), 3000);
+        } else {
+          setLiveStatus("idle");
         }
-      );
-      streamCleanupRef.current = cleanup;
-    }, 800);
+        streamCleanupRef.current = null;
+      }
+    );
+    streamCleanupRef.current = cleanup;
 
     return () => {
-      if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
       streamCleanupRef.current?.();
       streamCleanupRef.current = null;
     };
-  }, [smartQuery, queryClient]);
+  }, [queryClient, shouldUseLiveStream, smartQuery]);
 
   function handlePageChange(page: number) {
     setPage(page);
@@ -352,17 +384,17 @@ export function VehicleGrid() {
             ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-50"
             : "border-brand-400/25 bg-brand-500/12 text-slate-100"
         }`}>
-          {hasVisibleResults && isOlxWorkerOnlySearch ? (
+          {hasVisibleResults && isWorkerOnlySearch ? (
             <>
               <span className="h-2 w-2 rounded-full bg-emerald-400 flex-shrink-0" />
-              Pesquisando mais opções para &ldquo;{smartQuery}&rdquo; na OLX. Já encontramos {totalResults} anúncio{totalResults === 1 ? "" : "s"} em {totalResultPages || 1} página{(totalResultPages || 1) === 1 ? "" : "s"} de resultado.
+              Pesquisando mais opções para &ldquo;{smartQuery}&rdquo; nas fontes ativas. Já encontramos {totalResults} anúncio{totalResults === 1 ? "" : "s"} em {totalResultPages || 1} página{(totalResultPages || 1) === 1 ? "" : "s"} de resultado.
             </>
           ) : hasVisibleResults ? (
             <>
               <span className="h-2 w-2 rounded-full bg-emerald-400 flex-shrink-0" />
               Pesquisando mais opções para &ldquo;{smartQuery}&rdquo;. Já analisamos {pagesScraped} página{pagesScraped === 1 ? "" : "s"} dos sites e, por enquanto, encontramos {totalResults} anúncio{totalResults === 1 ? "" : "s"} em {totalResultPages || 1} página{(totalResultPages || 1) === 1 ? "" : "s"} de resultado.
             </>
-          ) : isOlxWorkerOnlySearch ? (
+          ) : isWorkerOnlySearch ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin flex-shrink-0 text-brand-300" />
               Pesquisando &ldquo;{smartQuery}&rdquo;. Assim que os primeiros anúncios forem encontrados, os resultados aparecem aqui automaticamente.

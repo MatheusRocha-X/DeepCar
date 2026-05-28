@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting DeepCar API...")
-    await create_tables()
+    schema_info = await create_tables()
     logger.info("Database tables created/verified")
     startup_scrape_task = None
 
@@ -52,6 +52,12 @@ async def lifespan(app: FastAPI):
         logger.info("Daily rescore starting...")
         updated = await rescore_existing_vehicles(limit=None)
         logger.info("Daily rescore finished: %s vehicles reprocessed", updated)
+
+    added_columns = schema_info.get("vehicle_columns_added", []) if isinstance(schema_info, dict) else []
+    if added_columns:
+        logger.info("Backfilling derived vehicle flags for new columns: %s", ", ".join(added_columns))
+        updated = await rescore_existing_vehicles(limit=None)
+        logger.info("Derived vehicle flag backfill finished: %s vehicles reprocessed", updated)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_scheduled_scrape, "interval", hours=6, id="scraper_run", misfire_grace_time=300)

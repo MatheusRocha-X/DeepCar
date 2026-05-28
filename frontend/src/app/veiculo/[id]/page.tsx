@@ -159,6 +159,26 @@ export default function VehiclePage({ params }: PageProps) {
   const isBelowFipe = vehicle.preco !== undefined && vehicle.fipe_preco !== undefined
     ? vehicle.preco <= vehicle.fipe_preco
     : undefined;
+  const listingSignals = [
+    vehicle.possui_passagem_leilao
+      ? {
+          label: "Possui Passagem Por Leilão",
+          className: "border-rose-400/25 bg-rose-500/10 text-rose-200",
+        }
+      : null,
+    vehicle.valor_referente_entrada
+      ? {
+          label: "Valor Referente a Entrada",
+          className: "border-amber-300/25 bg-amber-500/10 text-amber-100",
+        }
+      : null,
+    vehicle.preco_suspeito
+      ? {
+          label: "Preço Muito Abaixo do Padrão",
+          className: "border-orange-300/25 bg-orange-500/10 text-orange-100",
+        }
+      : null,
+  ].filter((signal): signal is { label: string; className: string } => Boolean(signal));
 
   return (
     <div className="min-h-screen pb-16">
@@ -337,6 +357,17 @@ export default function VehiclePage({ params }: PageProps) {
                     {locationLabel && (
                       <span className="data-chip text-xs font-medium">{locationLabel}</span>
                     )}
+                    {listingSignals.map((signal) => (
+                      <span
+                        key={signal.label}
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]",
+                          signal.className
+                        )}
+                      >
+                        {signal.label}
+                      </span>
+                    ))}
                   </div>
                 </div>
 
@@ -370,14 +401,31 @@ export default function VehiclePage({ params }: PageProps) {
               </div>
             </section>
 
-            {vehicle.descricao && (
+            {(vehicle.descricao || listingSignals.length > 0) && (
               <section className="surface-panel rounded-[2.2rem] p-6 sm:p-8">
                 <h2 className="font-display text-2xl font-semibold tracking-[-0.03em] text-slate-900 dark:text-white">
-                  Descrição
+                  Descrição do anúncio
                 </h2>
-                <p className="mt-4 whitespace-pre-line text-sm leading-relaxed text-slate-600 dark:text-slate-300 sm:text-base">
-                  {vehicle.descricao}
-                </p>
+                {listingSignals.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {listingSignals.map((signal) => (
+                      <span
+                        key={`descricao-${signal.label}`}
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]",
+                          signal.className
+                        )}
+                      >
+                        {signal.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {vehicle.descricao && (
+                  <p className="mt-4 whitespace-pre-line text-sm leading-relaxed text-slate-600 dark:text-slate-300 sm:text-base">
+                    {vehicle.descricao}
+                  </p>
+                )}
               </section>
             )}
           </div>

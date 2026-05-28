@@ -3,8 +3,10 @@ from sqlalchemy import select, func, and_, or_, distinct, delete, update as sa_u
 from sqlalchemy.orm import load_only
 from typing import Optional, List, Any
 from datetime import datetime, timezone, timedelta
+import re
 from app.models.vehicle import Vehicle
 from app.core.database import AsyncSessionLocal
+from app.core.listing_flags import detect_listing_flags
 import logging
 import asyncio
 import unicodedata
@@ -17,6 +19,7 @@ from app.models.favorite import Favorite
 from app.models.schemas import SearchFilters, VehicleCreate, OrderBy
 from app.core.cache import cache_get, cache_set
 from app.core.text_normalizer import normalize_city, normalize_text_key
+from app.services.score_service import calcular_score
 import hashlib
 import json
 
@@ -42,12 +45,19 @@ SMART_SCRAPE_FILTER_FIELDS = (
     "estado",
     "cidade",
     "source",
+    "passagem_leilao",
 )
 
 QUERY_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "thp": ("thp", "turbo"),
     "turbo": ("turbo", "thp"),
 }
+
+QUERY_YEAR_PATTERN = re.compile(r"\b(?:19[5-9]\d|20\d\d|2030)\b")
+QUERY_YEAR_RANGE_PATTERN = re.compile(
+    r"\b(19[5-9]\d|20\d\d|2030)\s*(?:-|/|a|ate|até)\s*(19[5-9]\d|20\d\d|2030)\b",
+    re.IGNORECASE,
+)
 
 KNOWN_QUERY_BRAND_TERMS: dict[str, str] = {
     "alfa": "Alfa Romeo",
@@ -214,6 +224,36 @@ def _build_query_term_groups(value: Any) -> list[list[str]]:
     return groups
 
 
+def _extract_query_year_bounds(value: Any) -> tuple[str, Optional[int], Optional[int]]:
+    raw_value = _clean_filter_text(value)
+    if not raw_value:
+        return "", None, None
+
+    extracted_years: list[int] = []
+    for start_year, end_year in QUERY_YEAR_RANGE_PATTERN.findall(raw_value):
+        extracted_years.extend([int(start_year), int(end_year)])
+
+    cleaned_value = QUERY_YEAR_RANGE_PATTERN.sub(" ", raw_value)
+
+    for match in QUERY_YEAR_PATTERN.findall(cleaned_value):
+        extracted_years.append(int(match))
+
+    cleaned_value = QUERY_YEAR_PATTERN.sub(" ", cleaned_value)
+    cleaned_value = re.sub(r"\s+", " ", cleaned_value).strip(" ,-/")
+
+    if not extracted_years:
+        return raw_value, None, None
+
+    return cleaned_value, min(extracted_years), max(extracted_years)
+
+
+def _resolve_effective_year_bounds(filters: SearchFilters) -> tuple[Optional[int], Optional[int]]:
+    _, query_year_min, query_year_max = _extract_query_year_bounds(filters.q)
+    year_min = filters.ano_min if filters.ano_min is not None else query_year_min
+    year_max = filters.ano_max if filters.ano_max is not None else query_year_max
+    return year_min, year_max
+
+
 def _matches_query_terms_in_text(value: Any, query: Any) -> bool:
     searchable_text = _normalize_filter_key(value)
     if not searchable_text:
@@ -355,6 +395,7 @@ def build_smart_scrape_display_query(filters: SearchFilters) -> str:
     cidade = _clean_filter_text(filters.cidade)
     estado = _clean_filter_text(filters.estado)
     source = _clean_filter_text(filters.source)
+    passagem_leilao = filters.passagem_leilao
 
     if combustivel:
         parts.append(f"combustivel {combustivel}")
@@ -390,6 +431,10 @@ def build_smart_scrape_display_query(filters: SearchFilters) -> str:
 
     if source:
         parts.append(f"fonte {source}")
+    if passagem_leilao is True:
+        parts.append("com passagem por leilao")
+    elif passagem_leilao is False:
+        parts.append("sem passagem por leilao")
 
     return " ".join(part for part in parts if part)
 
@@ -400,6 +445,9 @@ def build_smart_scrape_query(filters: SearchFilters) -> str:
 
     terms: list[str] = []
     seen: set[str] = set()
+    query_text, query_year_min, query_year_max = _extract_query_year_bounds(filters.q)
+    year_min = filters.ano_min if filters.ano_min is not None else query_year_min
+    year_max = filters.ano_max if filters.ano_max is not None else query_year_max
 
     def add_term(value: Any) -> None:
         text = _clean_filter_text(value)
@@ -409,16 +457,16 @@ def build_smart_scrape_query(filters: SearchFilters) -> str:
         terms.append(text)
         seen.add(key)
 
-    add_term(_canonicalize_scrape_query_text(filters.q))
+    add_term(_canonicalize_scrape_query_text(query_text))
     add_term(_canonicalize_scrape_query_text(filters.marca))
     add_term(filters.modelo)
 
-    if filters.ano_min is not None and filters.ano_max is not None and filters.ano_min == filters.ano_max:
-        add_term(filters.ano_min)
-    elif filters.ano_min is not None and filters.ano_max is None:
-        add_term(filters.ano_min)
-    elif filters.ano_max is not None and filters.ano_min is None:
-        add_term(filters.ano_max)
+    if year_min is not None and year_max is not None and year_min == year_max:
+        add_term(year_min)
+    elif year_min is not None and year_max is None:
+        add_term(year_min)
+    elif year_max is not None and year_min is None:
+        add_term(year_max)
 
     if not terms:
         terms.append("carro")
@@ -428,6 +476,7 @@ def build_smart_scrape_query(filters: SearchFilters) -> str:
 
 def build_olx_query_params(filters: SearchFilters) -> dict[str, str]:
     params: dict[str, str] = {}
+    year_min, year_max = _resolve_effective_year_bounds(filters)
 
     fuel_map = {
         "gasolina": "1",
@@ -467,10 +516,10 @@ def build_olx_query_params(filters: SearchFilters) -> dict[str, str]:
         params["ms"] = str(int(filters.km_min))
     if filters.km_max is not None:
         params["me"] = str(int(filters.km_max))
-    if filters.ano_min is not None:
-        params["rs"] = str(int(filters.ano_min))
-    if filters.ano_max is not None:
-        params["re"] = str(int(filters.ano_max))
+    if year_min is not None:
+        params["rs"] = str(int(year_min))
+    if year_max is not None:
+        params["re"] = str(int(year_max))
 
     fuel_value = fuel_map.get(_normalize_filter_key(filters.combustivel))
     if fuel_value:
@@ -597,6 +646,44 @@ def _extract_olx_search_base_url(source_url: Any) -> Optional[str]:
 async def resolve_olx_base_urls(db: AsyncSession, filters: SearchFilters, brand_path: Optional[str] = None) -> list[str]:
     state = _clean_filter_text(filters.estado).upper()
     city_key = _normalize_filter_key(filters.cidade)
+    query_text, _, _ = _extract_query_year_bounds(filters.q)
+
+    has_direct_search_signal = any(
+        _has_filter_value(value)
+        for value in (
+            _clean_filter_text(query_text) if _normalize_filter_key(query_text) != "carro" else "",
+            filters.marca,
+            filters.modelo,
+            filters.ano_min,
+            filters.ano_max,
+        )
+    )
+    has_structured_only_signal = any(
+        _has_filter_value(value)
+        for value in (
+            filters.preco_min,
+            filters.preco_max,
+            filters.km_min,
+            filters.km_max,
+            filters.combustivel,
+            filters.cambio,
+            filters.vendedor_tipo,
+            filters.estado,
+            filters.cidade,
+        )
+    )
+
+    # Broad state-only OLX searches behave better through the global category URL.
+    # The region-specific SSR routes can collapse to the OLX homepage under curl
+    # fallback, which leaves the smart scrape stuck at zero collected listings.
+    if (
+        state
+        and not city_key
+        and not brand_path
+        and not has_direct_search_signal
+        and has_structured_only_signal
+    ):
+        return [f"https://www.olx.com.br/{OLX_BASE_CATEGORY_PATH}"]
 
     if not state and not city_key:
         default_url = f"https://www.olx.com.br/{OLX_BASE_CATEGORY_PATH}"
@@ -672,12 +759,16 @@ async def build_olx_request_options(db: AsyncSession, filters: SearchFilters) ->
 
 
 def vehicle_matches_filters(vehicle_data: dict, filters: SearchFilters) -> bool:
-    if filters.q:
+    query_text, query_year_min, query_year_max = _extract_query_year_bounds(filters.q)
+    year_min = filters.ano_min if filters.ano_min is not None else query_year_min
+    year_max = filters.ano_max if filters.ano_max is not None else query_year_max
+
+    if query_text:
         searchable_text = " ".join(
             _clean_filter_text(vehicle_data.get(field))
             for field in ("titulo", "marca", "modelo", "versao", "descricao", "estado", "cidade")
         )
-        if not _matches_query_terms_in_text(searchable_text, filters.q):
+        if not _matches_query_terms_in_text(searchable_text, query_text):
             return False
 
     if filters.marca and not _contains_text(vehicle_data.get("marca"), filters.marca):
@@ -686,9 +777,9 @@ def vehicle_matches_filters(vehicle_data: dict, filters: SearchFilters) -> bool:
         return False
 
     ano = _coerce_float(vehicle_data.get("ano"))
-    if filters.ano_min is not None and (ano is None or ano < filters.ano_min):
+    if year_min is not None and (ano is None or ano < year_min):
         return False
-    if filters.ano_max is not None and (ano is None or ano > filters.ano_max):
+    if year_max is not None and (ano is None or ano > year_max):
         return False
 
     km = _coerce_float(vehicle_data.get("km"))
@@ -715,6 +806,12 @@ def vehicle_matches_filters(vehicle_data: dict, filters: SearchFilters) -> bool:
         return False
     if filters.source and _clean_filter_text(vehicle_data.get("source_name")).casefold() != _clean_filter_text(filters.source).casefold():
         return False
+    if filters.passagem_leilao is not None:
+        flag_value = vehicle_data.get("possui_passagem_leilao")
+        if flag_value is None:
+            flag_value = detect_listing_flags(vehicle_data)["possui_passagem_leilao"]
+        if bool(flag_value) != filters.passagem_leilao:
+            return False
 
     return True
 
@@ -728,9 +825,12 @@ async def search_vehicles(db: AsyncSession, filters: SearchFilters):
             return cached
 
     query = select(Vehicle).where(Vehicle.ativo == True)
+    query_text, query_year_min, query_year_max = _extract_query_year_bounds(filters.q)
+    year_min = filters.ano_min if filters.ano_min is not None else query_year_min
+    year_max = filters.ano_max if filters.ano_max is not None else query_year_max
 
-    if filters.q:
-        for group in _build_query_term_groups(filters.q):
+    if query_text:
+        for group in _build_query_term_groups(query_text):
             group_terms = []
             for candidate in group:
                 term = f"%{candidate}%"
@@ -751,10 +851,10 @@ async def search_vehicles(db: AsyncSession, filters: SearchFilters):
         query = query.where(Vehicle.marca.ilike(f"%{filters.marca}%"))
     if filters.modelo:
         query = query.where(Vehicle.modelo.ilike(f"%{filters.modelo}%"))
-    if filters.ano_min:
-        query = query.where(Vehicle.ano >= filters.ano_min)
-    if filters.ano_max:
-        query = query.where(Vehicle.ano <= filters.ano_max)
+    if year_min is not None:
+        query = query.where(Vehicle.ano >= year_min)
+    if year_max is not None:
+        query = query.where(Vehicle.ano <= year_max)
     if filters.km_min is not None:
         query = query.where(Vehicle.km >= filters.km_min)
     if filters.km_max is not None:
@@ -780,6 +880,8 @@ async def search_vehicles(db: AsyncSession, filters: SearchFilters):
             query = query.where(Vehicle.cidade.ilike(f"%{filters.cidade}%"))
     if filters.source:
         query = query.where(Vehicle.source_name == filters.source)
+    if filters.passagem_leilao is not None:
+        query = query.where(Vehicle.possui_passagem_leilao == filters.passagem_leilao)
 
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
@@ -816,10 +918,59 @@ async def search_vehicles(db: AsyncSession, filters: SearchFilters):
     return response
 
 
+def _needs_olx_detail_enrichment(vehicle_data: dict) -> bool:
+    source_name = _clean_filter_text(vehicle_data.get("source_name")).casefold()
+    if source_name != "olx":
+        return False
+
+    if vehicle_data.get("possui_passagem_leilao"):
+        return False
+
+    description = _clean_filter_text(vehicle_data.get("descricao"))
+    return not description or description.startswith("Opcionais:")
+
+
+async def _enrich_olx_vehicle_detail_if_needed(db: AsyncSession, vehicle: Vehicle) -> Vehicle:
+    vehicle_data = _vehicle_to_dict(vehicle)
+    if not _needs_olx_detail_enrichment(vehicle_data):
+        return vehicle
+
+    try:
+        from app.scrapers.olx_scraper import OLXScraper
+
+        scraper = OLXScraper(max_pages=1)
+        enriched_data = await scraper.enrich_vehicle_dict(vehicle_data)
+    except Exception as exc:
+        logger.warning("Failed to enrich OLX vehicle %s from detail page: %s", vehicle.id, exc)
+        return vehicle
+
+    if enriched_data == vehicle_data:
+        return vehicle
+
+    flags = detect_listing_flags(enriched_data, preco_referencia=vehicle.fipe_preco)
+    score, insights = calcular_score(
+        enriched_data,
+        preco_medio_mercado=None,
+        fipe_preco=vehicle.fipe_preco,
+    )
+
+    vehicle.descricao = enriched_data.get("descricao")
+    vehicle.possui_passagem_leilao = flags["possui_passagem_leilao"]
+    vehicle.valor_referente_entrada = flags["valor_referente_entrada"]
+    vehicle.preco_suspeito = flags["preco_suspeito"]
+    vehicle.score = score
+    vehicle.insights = insights
+    vehicle.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(vehicle)
+    return vehicle
+
+
 async def get_vehicle_by_id(db: AsyncSession, vehicle_id: int):
     cache_key = f"vehicle:{vehicle_id}"
     cached = await cache_get(cache_key)
-    if cached:
+    if cached and not _needs_olx_detail_enrichment(cached):
         return cached
 
     result = await db.execute(select(Vehicle).where(Vehicle.id == vehicle_id, Vehicle.ativo == True))
@@ -827,6 +978,8 @@ async def get_vehicle_by_id(db: AsyncSession, vehicle_id: int):
 
     if not vehicle:
         return None
+
+    vehicle = await _enrich_olx_vehicle_detail_if_needed(db, vehicle)
 
     data = _vehicle_to_dict(vehicle)
     await cache_set(cache_key, data, ttl=600)
@@ -863,6 +1016,8 @@ STATIC_BRANDS: dict[str, list[str]] = {
     "Dodge": ["RAM 1500", "RAM 2500", "Challenger", "Charger", "Durango", "Journey"],
     "Jeep": ["Renegade", "Compass", "Commander", "Wrangler"],
 }
+
+STATIC_SOURCE_OPTIONS = ["OLX", "iCarros"]
 
 
 async def get_filter_options(db: AsyncSession):
@@ -934,7 +1089,7 @@ async def get_filter_options(db: AsyncSession):
     fontes_result = await db.execute(
         select(distinct(Vehicle.source_name)).where(Vehicle.ativo == True)
     )
-    fontes = sorted([r[0] for r in fontes_result.all() if r[0]])
+    fontes = sorted({*STATIC_SOURCE_OPTIONS, *[r[0] for r in fontes_result.all() if r[0]]})
 
     preco_result = await db.execute(
         select(func.min(Vehicle.preco), func.max(Vehicle.preco)).where(Vehicle.ativo == True, Vehicle.preco != None)
@@ -1032,6 +1187,14 @@ async def remove_favorite(db: AsyncSession, session_id: str, vehicle_id: int):
 
 
 async def create_or_update_vehicle(db: AsyncSession, vehicle_data: dict) -> Vehicle:
+    flags = detect_listing_flags(vehicle_data, preco_referencia=vehicle_data.get("fipe_preco"))
+    vehicle_data = {
+        **vehicle_data,
+        "possui_passagem_leilao": bool(vehicle_data["possui_passagem_leilao"]) if "possui_passagem_leilao" in vehicle_data else flags["possui_passagem_leilao"],
+        "valor_referente_entrada": bool(vehicle_data["valor_referente_entrada"]) if "valor_referente_entrada" in vehicle_data else flags["valor_referente_entrada"],
+        "preco_suspeito": bool(vehicle_data["preco_suspeito"]) if "preco_suspeito" in vehicle_data else flags["preco_suspeito"],
+    }
+
     existing = await db.execute(
         select(Vehicle).where(Vehicle.source_url == vehicle_data["source_url"])
     )
@@ -1166,6 +1329,9 @@ def _vehicle_to_card(v: Vehicle) -> dict:
         "fotos": v.fotos or [],
         "source_url": v.source_url,
         "source_name": v.source_name,
+        "possui_passagem_leilao": v.possui_passagem_leilao,
+        "valor_referente_entrada": v.valor_referente_entrada,
+        "preco_suspeito": v.preco_suspeito,
         "score": v.score,
         "insights": v.insights or [],
         "fipe_preco": v.fipe_preco,
@@ -1195,6 +1361,9 @@ def _vehicle_to_dict(v: Vehicle) -> dict:
         "fipe_preco": v.fipe_preco,
         "source_url": v.source_url,
         "source_name": v.source_name,
+        "possui_passagem_leilao": v.possui_passagem_leilao,
+        "valor_referente_entrada": v.valor_referente_entrada,
+        "preco_suspeito": v.preco_suspeito,
         "score": v.score,
         "insights": v.insights or [],
         "ativo": v.ativo,

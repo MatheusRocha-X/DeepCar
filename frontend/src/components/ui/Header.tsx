@@ -4,10 +4,9 @@ import Image from "next/image";
 import { useTheme } from "next-themes";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Sun, Moon, Heart, Search } from "lucide-react";
+import { Sun, Moon, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
-import { useFavoriteStore } from "@/store";
 
 const BRAND_ICON_URL = "/DeepCar_Icon.png?v=20260525";
 
@@ -16,11 +15,9 @@ export function Header() {
   const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
   const [scrolled, setScrolled] = useState(false);
-  const favoriteIds = useFavoriteStore((s) => s.favoriteIds);
 
   const navigation = [
     { href: "/", label: "Explorar", icon: Search },
-    { href: "/favoritos", label: "Favoritos", icon: Heart },
   ];
 
   useEffect(() => {
@@ -84,11 +81,6 @@ export function Header() {
                 >
                   <Icon className="h-4 w-4" />
                   <span className="hidden sm:inline">{item.label}</span>
-                  {item.href === "/favoritos" && favoriteIds.length > 0 && (
-                    <span className="absolute -right-1 -top-1 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-brand-500 px-1 text-[10px] font-bold text-white">
-                      {favoriteIds.length > 9 ? "9+" : favoriteIds.length}
-                    </span>
-                  )}
                 </Link>
               );
             })}

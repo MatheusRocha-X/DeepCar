@@ -8,6 +8,7 @@ import json
 import httpx
 import shutil
 import subprocess
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,73 @@ class OLXScraper(BaseScraper):
             self.logger.warning(f"OLX __NEXT_DATA__ decode error: {e}")
             return None
 
+    def _extract_description_from_detail_html(self, html_text: str) -> Optional[str]:
+        if not html_text:
+            return None
+
+        json_ld_blocks = re.findall(
+            r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            html_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+
+        def _iter_json_nodes(node):
+            if isinstance(node, dict):
+                yield node
+                for value in node.values():
+                    yield from _iter_json_nodes(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from _iter_json_nodes(item)
+
+        for block in json_ld_blocks:
+            try:
+                payload = json.loads(block)
+            except Exception:
+                continue
+
+            for node in _iter_json_nodes(payload):
+                description = str(node.get("description") or "").strip()
+                if description:
+                    return description
+
+        try:
+            soup = BeautifulSoup(html_text, "lxml")
+        except Exception:
+            return None
+
+        for selector in (
+            'meta[property="og:description"]',
+            'meta[name="description"]',
+        ):
+            meta = soup.select_one(selector)
+            content = (meta.get("content") or "").strip() if meta else ""
+            if content:
+                return content
+
+        return None
+
+    async def enrich_vehicle_dict(self, vehicle_data: dict) -> dict:
+        source_url = str(vehicle_data.get("source_url") or "").strip()
+        if not source_url:
+            return vehicle_data
+
+        async with self._create_client() as client:
+            html_text = await self._get_listing_page(client, source_url, context="OLX detail enrich")
+
+        description = self._extract_description_from_detail_html(html_text or "")
+        if not description:
+            return vehicle_data
+
+        current_description = str(vehicle_data.get("descricao") or "").strip()
+        if not current_description or current_description.startswith("Opcionais:"):
+            return {**vehicle_data, "descricao": description}
+
+        if description in current_description:
+            return vehicle_data
+
+        return {**vehicle_data, "descricao": f"{current_description}\n\n{description}"}
+
     async def scrape(self, max_pages: Optional[int] = None) -> List[dict]:
         pages_limit = max_pages or self.max_pages
         vehicles = []
@@ -256,6 +324,7 @@ class OLXScraper(BaseScraper):
         v = BaseVehicleData()
         v.source_name = "OLX"
         try:
+            has_dealership_review = False
             v.titulo = ad.get("subject") or ad.get("title") or ""
             v.titulo = v.titulo.strip()
 
@@ -336,6 +405,8 @@ class OLXScraper(BaseScraper):
                     v.cambio = self._normalize_cambio(val)
                 elif name == "seller_type" or name == "owner_type":
                     v.vendedor_tipo = self._normalize_vendedor(val)
+                elif name == "dealership_review":
+                    has_dealership_review = val.casefold() == "sim"
                 elif name == "car_features":
                     # Store as part of description
                     if val:
@@ -348,8 +419,9 @@ class OLXScraper(BaseScraper):
                 if account_type:
                     v.vendedor_tipo = self._normalize_vendedor(account_type)
 
-            # professionalAd flag
-            if ad.get("professionalAd") and not v.vendedor_tipo:
+            # OLX no longer fills seller/account fields consistently on some
+            # listing payloads, but dealership_review=Sim still marks dealer ads.
+            if (ad.get("professionalAd") or has_dealership_review) and not v.vendedor_tipo:
                 v.vendedor_tipo = "Loja"
             elif not v.vendedor_tipo:
                 v.vendedor_tipo = "Pessoa Física"

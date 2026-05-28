@@ -50,6 +50,9 @@ class VehicleBase(BaseModel):
     fotos: Optional[List[str]] = []
     source_url: str
     source_name: str
+    possui_passagem_leilao: bool = False
+    valor_referente_entrada: bool = False
+    preco_suspeito: bool = False
     score: Optional[float] = 0.0
     insights: Optional[List[str]] = []
 
@@ -82,6 +85,9 @@ class VehicleCard(BaseModel):
     fotos: Optional[List[str]] = []
     source_url: str
     source_name: str
+    possui_passagem_leilao: bool = False
+    valor_referente_entrada: bool = False
+    preco_suspeito: bool = False
     score: Optional[float] = 0.0
     insights: Optional[List[str]] = []
     combustivel: Optional[str] = None
@@ -107,6 +113,7 @@ class SearchFilters(BaseModel):
     estado: Optional[str] = None
     cidade: Optional[str] = None
     source: Optional[str] = None
+    passagem_leilao: Optional[bool] = None
     order_by: Optional[OrderBy] = OrderBy.score
     page: int = Field(1, ge=1)
     per_page: int = Field(20, ge=1, le=100)

@@ -16,6 +16,9 @@ export interface Vehicle {
   fotos: string[];
   source_url: string;
   source_name: string;
+  possui_passagem_leilao: boolean;
+  valor_referente_entrada: boolean;
+  preco_suspeito: boolean;
   score: number;
   insights: string[];
   fipe_preco?: number;
@@ -63,6 +66,7 @@ export interface SearchFilters {
   estado?: string;
   cidade?: string;
   source?: string;
+  passagem_leilao?: boolean;
   order_by?: OrderBy;
   page?: number;
   per_page?: number;
@@ -81,14 +85,6 @@ export interface FavoriteItem {
   vehicle_id: number;
   vehicle?: Vehicle;
   created_at?: string;
-}
-
-export interface ScraperStatus {
-  source: string;
-  status: string;
-  last_run?: string;
-  total_collected: number;
-  errors: number;
 }
 
 export interface ScrapeProgress {

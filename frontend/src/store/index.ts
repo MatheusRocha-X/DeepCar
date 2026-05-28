@@ -3,8 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import type { SearchFilters, OrderBy } from "@/types";
 
 function sanitizeFilters(filters: SearchFilters): SearchFilters {
-  const { source: _source, ...rest } = filters;
-  return rest;
+  return filters;
 }
 
 interface SearchState {

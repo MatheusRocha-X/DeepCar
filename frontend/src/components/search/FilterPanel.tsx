@@ -1,12 +1,12 @@
 "use client";
 
 import * as SelectPrimitive from "@radix-ui/react-select";
-import { useQuery } from "@tanstack/react-query";
-import { getFilterOptions } from "@/lib/api";
+import { useIsFetching, useQuery } from "@tanstack/react-query";
+import { getFilterOptions, getInitialBootstrapStatus, getSearchScrapeProgress } from "@/lib/api";
 import { useSearchStore } from "@/store";
 import type { SearchFilters } from "@/types";
 import { cn } from "@/lib/utils";
-import { SlidersHorizontal, ChevronDown, X, Search, Check } from "lucide-react";
+import { SlidersHorizontal, ChevronDown, X, Search, Check, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
 
 const EMPTY_SELECT_VALUE = "__deepcar_any__";
@@ -173,6 +173,109 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   );
 }
 
+function formatQueryNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(value);
+}
+
+function hasAppliedSearchFilters(filters: SearchFilters): boolean {
+  return Object.entries(filters).some(([key, value]) => {
+    if (key === "order_by" || key === "page" || key === "per_page") {
+      return false;
+    }
+
+    return value !== undefined && value !== null && value !== "";
+  });
+}
+
+function buildSmartQuery(filters: SearchFilters): string {
+  if (!hasAppliedSearchFilters(filters)) {
+    return "";
+  }
+
+  const q = filters.q?.trim() || "";
+  const marca = filters.marca?.trim() || "";
+  const modelo = filters.modelo?.trim() || "";
+  const combustivel = filters.combustivel?.trim() || "";
+  const cambio = filters.cambio?.trim() || "";
+  const vendedorTipo = filters.vendedor_tipo?.trim() || "";
+  const cidade = filters.cidade?.trim() || "";
+  const estado = filters.estado?.trim() || "";
+  const source = filters.source?.trim() || "";
+  const passagemLeilao = filters.passagem_leilao;
+  const parts: string[] = [];
+
+  if (q) {
+    parts.push(q);
+    if (marca) {
+      parts.push(`marca ${marca}`);
+    }
+    if (modelo) {
+      parts.push(`modelo ${modelo}`);
+    }
+  } else {
+    if (marca) {
+      parts.push(marca);
+    }
+    if (modelo) {
+      parts.push(modelo);
+    }
+    if (!parts.length) {
+      parts.push("carro");
+    }
+  }
+
+  if (combustivel) {
+    parts.push(`combustivel ${combustivel}`);
+  }
+  if (cambio) {
+    parts.push(`cambio ${cambio}`);
+  }
+  if (vendedorTipo) {
+    parts.push(`vendedor ${vendedorTipo}`);
+  }
+  if (cidade) {
+    parts.push(`cidade ${cidade}`);
+  }
+  if (estado) {
+    parts.push(`estado ${estado}`);
+  }
+
+  if (filters.ano_min !== undefined && filters.ano_max !== undefined) {
+    parts.push(`ano ${filters.ano_min}-${filters.ano_max}`);
+  } else if (filters.ano_min !== undefined) {
+    parts.push(`ano ${filters.ano_min}+`);
+  } else if (filters.ano_max !== undefined) {
+    parts.push(`ano ate ${filters.ano_max}`);
+  }
+
+  if (filters.km_min !== undefined && filters.km_max !== undefined) {
+    parts.push(`km ${filters.km_min}-${filters.km_max}`);
+  } else if (filters.km_min !== undefined) {
+    parts.push(`km ${filters.km_min}+`);
+  } else if (filters.km_max !== undefined) {
+    parts.push(`km ate ${filters.km_max}`);
+  }
+
+  if (filters.preco_min !== undefined && filters.preco_max !== undefined) {
+    parts.push(`preco ${formatQueryNumber(filters.preco_min)}-${formatQueryNumber(filters.preco_max)}`);
+  } else if (filters.preco_min !== undefined) {
+    parts.push(`preco ${formatQueryNumber(filters.preco_min)}+`);
+  } else if (filters.preco_max !== undefined) {
+    parts.push(`preco ate ${formatQueryNumber(filters.preco_max)}`);
+  }
+
+  if (source) {
+    parts.push(`fonte ${source}`);
+  }
+  if (passagemLeilao === true) {
+    parts.push("com passagem por leilao");
+  } else if (passagemLeilao === false) {
+    parts.push("sem passagem por leilao");
+  }
+
+  return parts.join(" ");
+}
+
 // ── Campos que o FilterPanel gerencia (sem q, page, per_page, order_by) ──
 type DraftFilters = Pick<SearchFilters,
   | "marca" | "modelo"
@@ -181,12 +284,14 @@ type DraftFilters = Pick<SearchFilters,
   | "preco_min" | "preco_max"
   | "combustivel" | "cambio" | "vendedor_tipo"
   | "estado" | "cidade"
+  | "source"
+  | "passagem_leilao"
 >;
 
 const DRAFT_KEYS: (keyof DraftFilters)[] = [
   "marca", "modelo", "ano_min", "ano_max", "km_min", "km_max",
   "preco_min", "preco_max", "combustivel", "cambio", "vendedor_tipo",
-  "estado", "cidade",
+  "estado", "cidade", "source", "passagem_leilao",
 ];
 
 function toDraft(f: SearchFilters): DraftFilters {
@@ -198,25 +303,70 @@ function toDraft(f: SearchFilters): DraftFilters {
     combustivel: f.combustivel, cambio: f.cambio,
     vendedor_tipo: f.vendedor_tipo,
     estado: f.estado, cidade: f.cidade,
+    source: f.source,
+    passagem_leilao: f.passagem_leilao,
   };
 }
 
 export function FilterPanel() {
   const { filters, setFilters, resetFilters } = useSearchStore();
   const [expanded, setExpanded] = useState(false);
+  const [showRecentSearchFeedback, setShowRecentSearchFeedback] = useState(false);
   const appliedDraft = toDraft(filters);
   const appliedDraftKey = JSON.stringify(appliedDraft);
+  const appliedSmartQuery = buildSmartQuery(filters);
 
   // Mudanças ficam no draft até o usuário clicar "Buscar"
   const [draft, setDraft] = useState<DraftFilters>(() => toDraft(filters));
   // Último estado confirmado (para o botão Cancelar voltar)
   const [committed, setCommitted] = useState<DraftFilters>(() => toDraft(filters));
 
+  const { data: bootstrapStatus } = useQuery({
+    queryKey: ["initialBootstrapStatus"],
+    queryFn: getInitialBootstrapStatus,
+    refetchInterval: (query) => {
+      const status = query.state.data;
+      if (!status || (!status.done && status.status !== "skipped")) {
+        return 1500;
+      }
+
+      return status?.running ? 1500 : false;
+    },
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+    staleTime: 0,
+  });
+
+  const shouldPollFilterOptions = !bootstrapStatus || (!bootstrapStatus.done && bootstrapStatus.status !== "skipped");
+
   const { data: options, isLoading } = useQuery({
     queryKey: ["filterOptions"],
     queryFn: getFilterOptions,
-    staleTime: 5 * 60 * 1000,
+    placeholderData: (previous) => previous,
+    staleTime: shouldPollFilterOptions ? 0 : 5 * 60 * 1000,
+    refetchInterval: shouldPollFilterOptions ? 3000 : false,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
   });
+
+  const { data: scrapeProgress } = useQuery({
+    queryKey: ["scrapeProgress", appliedSmartQuery],
+    queryFn: () => getSearchScrapeProgress(appliedSmartQuery),
+    enabled: appliedSmartQuery.length >= 3,
+    refetchInterval: (query) => {
+      const progress = query.state.data;
+      if (progress?.done) {
+        return false;
+      }
+
+      return progress?.running ? 1500 : false;
+    },
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+    staleTime: 0,
+  });
+
+  const activeVehicleRequests = useIsFetching({ queryKey: ["vehicles"] });
 
   const modelos = options?.modelos && draft.marca
     ? (options.modelos[draft.marca] || [])
@@ -225,21 +375,50 @@ export function FilterPanel() {
   const cidades = options?.cidades && draft.estado
     ? (options.cidades[draft.estado] || [])
     : [];
+  const fontes = options?.fontes?.length
+    ? options.fontes
+    : ["OLX", "iCarros"];
 
   // Quantos filtros estão aplicados nos resultados agora
   const activeFiltersCount = DRAFT_KEYS.filter((k) => committed[k] !== undefined).length;
 
   // Há mudanças no draft que ainda não foram buscadas?
   const isDirty = DRAFT_KEYS.some((k) => draft[k] !== committed[k]);
+  const isApplyingFilters = activeVehicleRequests > 0;
+  const isRadarScraping = appliedSmartQuery.length >= 3 && Boolean(scrapeProgress?.running || scrapeProgress?.worker_running);
+  const showFilterWarmupHint = shouldPollFilterOptions && !options?.estados?.length;
+  const showSearchFeedback = showRecentSearchFeedback && !isDirty;
+  const statusMessage = showFilterWarmupHint
+    ? "Carregando as opções do radar conforme a base inicial é preenchida."
+    : isApplyingFilters || showSearchFeedback
+      ? "Aplicando filtros e atualizando os resultados agora."
+      : isRadarScraping
+        ? scrapeProgress?.pages_scraped
+          ? `Radar consultando anúncios. ${scrapeProgress.pages_scraped} página${scrapeProgress.pages_scraped === 1 ? "" : "s"} já analisada${scrapeProgress.pages_scraped === 1 ? "" : "s"}.`
+          : "Radar consultando anúncios agora."
+        : null;
 
   useEffect(() => {
     setDraft(appliedDraft);
     setCommitted(appliedDraft);
   }, [appliedDraftKey]);
 
+  useEffect(() => {
+    if (!showRecentSearchFeedback) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setShowRecentSearchFeedback(false);
+    }, 4000);
+
+    return () => window.clearTimeout(timeout);
+  }, [showRecentSearchFeedback]);
+
   function handleSearch() {
     const snap = { ...draft };
     setCommitted(snap);
+    setShowRecentSearchFeedback(true);
     setFilters(snap);
   }
 
@@ -251,6 +430,7 @@ export function FilterPanel() {
     const empty = toDraft({} as SearchFilters);
     setDraft(empty);
     setCommitted(empty);
+    setShowRecentSearchFeedback(true);
     resetFilters();
   }
 
@@ -392,6 +572,24 @@ export function FilterPanel() {
           />
 
           <SelectField
+            label="Fonte"
+            value={draft.source}
+            onChange={(v) => setDraft((d) => ({ ...d, source: v }))}
+            options={fontes}
+          />
+
+          <SelectField
+            label="Leilão"
+            value={draft.passagem_leilao === undefined ? undefined : draft.passagem_leilao ? "Sim" : "Não"}
+            onChange={(v) => setDraft((d) => ({
+              ...d,
+              passagem_leilao: v === undefined ? undefined : v === "Sim",
+            }))}
+            options={["Sim", "Não"]}
+            placeholder="Todos"
+          />
+
+          <SelectField
             label="Estado"
             value={draft.estado}
             onChange={(v) => setDraft((d) => ({ ...d, estado: v, cidade: undefined }))}
@@ -412,13 +610,17 @@ export function FilterPanel() {
               onClick={handleSearch}
               className={cn(
                 "flex flex-1 items-center justify-center gap-1.5 rounded-[1.2rem] py-3 text-sm font-semibold transition-all",
-                isDirty
+                isDirty || isApplyingFilters || isRadarScraping || showSearchFeedback
                   ? "primary-button"
                   : "secondary-button"
               )}
             >
-              <Search className="w-3.5 h-3.5" />
-              Buscar
+              {isApplyingFilters || isRadarScraping || showSearchFeedback ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Search className="w-3.5 h-3.5" />
+              )}
+              {isApplyingFilters || showSearchFeedback ? "Buscando..." : isRadarScraping ? "Radar ativo" : "Buscar"}
             </button>
             {isDirty && (
               <button
@@ -429,6 +631,13 @@ export function FilterPanel() {
               </button>
             )}
           </div>
+
+          {statusMessage && (
+            <div className="flex items-start gap-2 rounded-[1.1rem] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs leading-relaxed text-slate-400">
+              <Loader2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 animate-spin text-brand-300" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy import select, update
 
 from app.core.database import AsyncSessionLocal, create_tables
+from app.core.listing_flags import detect_listing_flags
 from app.models.vehicle import Vehicle
 from app.services.fipe_service import get_fipe_price
 from app.services.score_service import calcular_score
@@ -25,6 +26,10 @@ def _vehicle_payload(vehicle: Vehicle) -> dict:
             fotos = []
 
     return {
+        "titulo": vehicle.titulo,
+        "marca": vehicle.marca,
+        "modelo": vehicle.modelo,
+        "versao": vehicle.versao,
         "preco": vehicle.preco,
         "km": vehicle.km,
         "ano": vehicle.ano,
@@ -72,16 +77,21 @@ async def update_missing_fipe_prices(
             logger.info("FIPE [%s/%s] %s %s %s", index, len(vehicles), marca, modelo, ano)
             fipe = await get_fipe_price(marca, modelo, ano)
             if fipe:
+                vehicle_payload = _vehicle_payload(vehicle)
                 new_score, new_insights = calcular_score(
-                    _vehicle_payload(vehicle),
+                    vehicle_payload,
                     fipe_preco=fipe["preco"],
                 )
+                flags = detect_listing_flags(vehicle_payload, preco_referencia=fipe["preco"])
                 async with AsyncSessionLocal() as db:
                     await db.execute(
                         update(Vehicle)
                         .where(Vehicle.id == vehicle.id)
                         .values(
                             fipe_preco=fipe["preco"],
+                            possui_passagem_leilao=flags["possui_passagem_leilao"],
+                            valor_referente_entrada=flags["valor_referente_entrada"],
+                            preco_suspeito=flags["preco_suspeito"],
                             score=new_score,
                             insights=new_insights,
                         )
@@ -137,12 +147,20 @@ async def rescore_existing_vehicles(limit: Optional[int] = None) -> int:
 
             for vehicle in vehicles:
                 key = f"{vehicle.marca or ''}_{vehicle.modelo or ''}_{vehicle.ano or 0}"
+                vehicle_payload = _vehicle_payload(vehicle)
                 score, insights = calcular_score(
-                    _vehicle_payload(vehicle),
+                    vehicle_payload,
                     preco_medio_mercado=medias.get(key),
                     fipe_preco=vehicle.fipe_preco,
                     amostra_preco_size=tamanhos_amostra.get(key),
                 )
+                flags = detect_listing_flags(
+                    vehicle_payload,
+                    preco_referencia=vehicle.fipe_preco if vehicle.fipe_preco else medias.get(key),
+                )
+                vehicle.possui_passagem_leilao = flags["possui_passagem_leilao"]
+                vehicle.valor_referente_entrada = flags["valor_referente_entrada"]
+                vehicle.preco_suspeito = flags["preco_suspeito"]
                 vehicle.score = score
                 vehicle.insights = insights
 

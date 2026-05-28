@@ -23,6 +23,9 @@ class Vehicle(Base):
     fotos = Column(JSON, default=list)
     source_url = Column(String(1000), nullable=False, unique=True)
     source_name = Column(String(50), nullable=False, index=True)
+    possui_passagem_leilao = Column(Boolean, default=False, nullable=False, index=True)
+    valor_referente_entrada = Column(Boolean, default=False, nullable=False, index=True)
+    preco_suspeito = Column(Boolean, default=False, nullable=False, index=True)
     score = Column(Float, default=0.0, index=True)
     insights = Column(JSON, default=list)
     fipe_preco = Column(Float, nullable=True)
@@ -34,4 +37,5 @@ class Vehicle(Base):
         Index("ix_vehicles_marca_modelo", "marca", "modelo"),
         Index("ix_vehicles_estado_cidade", "estado", "cidade"),
         Index("ix_vehicles_preco_km", "preco", "km"),
+        Index("ix_vehicles_flags", "possui_passagem_leilao", "valor_referente_entrada", "preco_suspeito"),
     )
