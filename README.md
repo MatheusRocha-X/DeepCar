@@ -5,6 +5,7 @@ Buscador de veículos usados e seminovos com agregação de anúncios, score aut
 ## Licenca
 
 Este projeto esta publicado com direitos reservados.
+Titular dos direitos autorais: Matheus do Nascimento Rocha.
 Nao e permitida a copia, reutilizacao, modificacao, distribuicao ou criacao de obras derivadas sem autorizacao previa por escrito do titular.
 
 Consulte o arquivo `LICENSE` para os termos completos.
